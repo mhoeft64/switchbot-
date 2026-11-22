@@ -3,6 +3,11 @@ package de.switchbot.lock
 import android.app.Activity
 import android.app.AlertDialog
 import android.graphics.Color
+import android.hardware.biometrics.BiometricManager
+import android.hardware.biometrics.BiometricPrompt
+import android.os.Build
+import android.os.CancellationSignal
+import android.widget.CheckBox
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
@@ -23,6 +28,7 @@ class MainActivity : Activity() {
     private lateinit var settingsBox: LinearLayout
     private lateinit var tokenField: EditText
     private lateinit var secretField: EditText
+    private lateinit var bioCheck: CheckBox
 
     private val prefs by lazy { getSharedPreferences("switchbot", MODE_PRIVATE) }
     private var lockId: String? = null
@@ -52,11 +58,7 @@ class MainActivity : Activity() {
 
         lockBtn = button("Abschließen", Color.parseColor("#2E7D32")) { send("lock") }
         unlockBtn = button("Aufschließen", Color.parseColor("#C62828")) {
-            AlertDialog.Builder(this)
-                .setMessage("Wirklich aufschließen?")
-                .setPositiveButton("Ja") { _, _ -> send("unlock") }
-                .setNegativeButton("Abbrechen", null)
-                .show()
+            authenticate("Zum Aufschließen bestätigen") { send("unlock") }
         }
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; addView(lockBtn); addView(unlockBtn) }
 
@@ -85,10 +87,16 @@ class MainActivity : Activity() {
                 refresh()
             }
         }
+        bioCheck = CheckBox(this).apply {
+            text = "Fingerabdruck zum Aufschließen verlangen"
+            setTextColor(Color.WHITE)
+            isChecked = prefs.getBoolean("bio", true)
+            setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("bio", on).apply() }
+        }
         settingsBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            addView(tokenField); addView(secretField); addView(save)
+            addView(tokenField); addView(secretField); addView(bioCheck); addView(save)
             visibility = if (prefs.getString("token", "").isNullOrEmpty()) View.VISIBLE else View.GONE
         }
         listOf(tokenField, secretField).forEach { it.setTextColor(Color.WHITE); it.setHintTextColor(Color.GRAY) }
@@ -140,5 +148,37 @@ class MainActivity : Activity() {
                 runOnUiThread { message.text = "Fehler: ${e.message}" }
             }
         }
+    }
+
+    /** Fingerabdruck (oder Bildschirmsperre) abfragen; ohne Biometrie-Pflicht nur eine Rückfrage. */
+    private fun authenticate(reason: String, onOk: () -> Unit) {
+        if (!prefs.getBoolean("bio", true)) {
+            AlertDialog.Builder(this)
+                .setMessage("Wirklich aufschließen?")
+                .setPositiveButton("Ja") { _, _ -> onOk() }
+                .setNegativeButton("Abbrechen", null)
+                .show()
+            return
+        }
+        val builder = BiometricPrompt.Builder(this).setTitle("Türschloss").setSubtitle(reason)
+        if (Build.VERSION.SDK_INT >= 30) {
+            builder.setAllowedAuthenticators(
+                BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                    BiometricManager.Authenticators.DEVICE_CREDENTIAL
+            )
+        } else {
+            builder.setNegativeButton("Abbrechen", mainExecutor) { _, _ -> }
+        }
+        builder.build().authenticate(
+            CancellationSignal(), mainExecutor,
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult?) {
+                    onOk()
+                }
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence?) {
+                    message.text = "Nicht bestätigt: $errString"
+                }
+            }
+        )
     }
 }
